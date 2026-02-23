@@ -1,5 +1,5 @@
 import os
-from agents.base import BaseAgent
+from agents.base import BaseAgent, summarize_text, CONTEXT_BUDGETS, DEFAULT_BUDGET
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
 
@@ -163,7 +163,7 @@ def load_prompt_file(step_id: str) -> str:
 
 
 class PipelineAgent(BaseAgent):
-    def __init__(self, api_key: str, model: str, step: dict):
+    def __init__(self, api_key: str, model: str, step: dict, budget: str = DEFAULT_BUDGET):
         self.name = step["name"]
         self.description = step["description"]
 
@@ -172,25 +172,35 @@ class PipelineAgent(BaseAgent):
         if md_content:
             self.system_prompt += f"\n\nADDITIONAL CONTEXT & INSTRUCTIONS:\n{md_content}"
 
-        super().__init__(api_key, model)
+        super().__init__(api_key, model, budget)
 
 
-def run_pipeline(api_key: str, model: str, rfp_text: str, kb_texts: list, user_prompt: str, progress_callback=None):
+def run_pipeline(api_key: str, model: str, rfp_text: str, kb_texts: list,
+                 user_prompt: str, budget: str = DEFAULT_BUDGET, progress_callback=None):
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    cfg = CONTEXT_BUDGETS.get(budget, CONTEXT_BUDGETS[DEFAULT_BUDGET])
+
+    rfp_summary = summarize_text(client, model, rfp_text, cfg["ctx_chars"], "RFP document")
+    if progress_callback:
+        progress_callback(-1, {"name": "Summarizing RFP"}, rfp_summary)
+
+    kb_summary = ""
+    if kb_texts:
+        combined = "\n---\n".join(kb_texts)
+        kb_summary = summarize_text(client, model, combined, cfg["prev_chars"], "knowledge base")
+
     results = {}
-    rfp_ctx = f"RFP DOCUMENT:\n{rfp_text}"
-    kb_ctx = "\n---\n".join(kb_texts) if kb_texts else ""
+    prev_summary = ""
 
     for i, step in enumerate(PIPELINE_STEPS):
-        agent = PipelineAgent(api_key, model, step)
+        agent = PipelineAgent(api_key, model, step, budget)
 
-        context = rfp_ctx
-        if kb_ctx:
-            context += f"\n\nKNOWLEDGE BASE:\n{kb_ctx}"
-        if results:
-            prev = "\n\n".join(
-                f"--- {name} ---\n{text}" for name, text in results.items()
-            )
-            context += f"\n\nPREVIOUS STEPS OUTPUT:\n{prev}"
+        context = f"RFP SUMMARY:\n{rfp_summary}"
+        if kb_summary:
+            context += f"\n\nKNOWLEDGE BASE SUMMARY:\n{kb_summary}"
+        if prev_summary:
+            context += f"\n\nPREVIOUS STEPS SUMMARY:\n{prev_summary}"
 
         prompt = f"{user_prompt}\n\nGenerate the '{step['name']}' section for this proposal."
         output = agent.run(prompt, context)
@@ -198,5 +208,11 @@ def run_pipeline(api_key: str, model: str, rfp_text: str, kb_texts: list, user_p
 
         if progress_callback:
             progress_callback(i, step, output)
+
+        all_prev = "\n\n".join(f"[{n}]: {t}" for n, t in results.items())
+        prev_summary = summarize_text(
+            client, model, all_prev, cfg["prev_chars"],
+            "previous pipeline outputs"
+        )
 
     return results

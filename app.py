@@ -1,5 +1,5 @@
 import streamlit as st
-from agents.base import AVAILABLE_MODELS, DEFAULT_MODEL
+from agents.base import AVAILABLE_MODELS, DEFAULT_MODEL, CONTEXT_BUDGETS, DEFAULT_BUDGET
 from agents.pipeline import PIPELINE_STEPS, PipelineAgent, run_pipeline
 from utils.document_parser import parse_document
 from utils.html_generator import generate_proposal_html
@@ -24,6 +24,15 @@ with st.sidebar:
                              help="Free at console.groq.com")
     selected_model = st.selectbox("Model", AVAILABLE_MODELS,
                                   index=AVAILABLE_MODELS.index(DEFAULT_MODEL))
+
+    budget_keys = list(CONTEXT_BUDGETS.keys())
+    budget_labels = [CONTEXT_BUDGETS[k]["label"] for k in budget_keys]
+    selected_budget_label = st.select_slider(
+        "Context Budget (lower = fewer tokens = stays in free tier)",
+        options=budget_labels,
+        value=CONTEXT_BUDGETS[DEFAULT_BUDGET]["label"],
+    )
+    selected_budget = budget_keys[budget_labels.index(selected_budget_label)]
 
     st.divider()
 
@@ -107,7 +116,7 @@ with col_main:
         if mode == "Single Agent" and selected_step:
             # --- Single Agent Mode ---
             step_cfg = next(s for s in PIPELINE_STEPS if s["name"] == selected_step)
-            agent = PipelineAgent(api_key, selected_model, step_cfg)
+            agent = PipelineAgent(api_key, selected_model, step_cfg, selected_budget)
 
             context = f"RFP DOCUMENT:\n{st.session_state.rfp_text}"
             if st.session_state.knowledge_base:
@@ -129,42 +138,30 @@ with col_main:
 
         else:
             # --- Full Pipeline Mode ---
-            progress = st.progress(0, text="Starting pipeline...")
+            progress = st.progress(0, text="Summarizing RFP document...")
             step_containers = {}
             for step in PIPELINE_STEPS:
                 step_containers[step["name"]] = st.empty()
 
-            results = {}
-            rfp_ctx = f"RFP DOCUMENT:\n{st.session_state.rfp_text}"
-            kb_ctx = (
-                "\n---\n".join(st.session_state.knowledge_base)
-                if st.session_state.knowledge_base
-                else ""
-            )
-
-            for i, step in enumerate(PIPELINE_STEPS):
-                pct = int((i / len(PIPELINE_STEPS)) * 100)
-                progress.progress(pct, text=f"Step {i+1}/7: {step['name']}...")
-
-                agent = PipelineAgent(api_key, selected_model, step)
-
-                context = rfp_ctx
-                if kb_ctx:
-                    context += f"\n\nKNOWLEDGE BASE:\n{kb_ctx}"
-                if results:
-                    prev = "\n\n".join(
-                        f"--- {n} ---\n{t}" for n, t in results.items()
-                    )
-                    context += f"\n\nPREVIOUS STEPS OUTPUT:\n{prev}"
-
-                prompt = f"{user_prompt}\n\nGenerate the '{step['name']}' section for this proposal."
-                output = agent.run(prompt, context)
-                results[step["name"]] = output
-
+            def on_progress(i, step, output):
+                if i == -1:
+                    progress.progress(5, text="RFP summarized. Starting pipeline...")
+                    return
+                pct = int(((i + 1) / len(PIPELINE_STEPS)) * 95) + 5
+                progress.progress(pct, text=f"Step {i+1}/7: {step['name']} done")
                 with step_containers[step["name"]].expander(
                     f"Step {i+1}: {step['name']}", expanded=(i == len(PIPELINE_STEPS) - 1)
                 ):
                     st.markdown(output)
+
+            results = run_pipeline(
+                api_key, selected_model,
+                st.session_state.rfp_text,
+                st.session_state.knowledge_base,
+                user_prompt,
+                budget=selected_budget,
+                progress_callback=on_progress,
+            )
 
             progress.progress(100, text="Pipeline complete!")
             st.session_state.step_outputs = results
