@@ -24,7 +24,7 @@ def call_droid(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 180) -> s
             f.write(prompt)
 
         result = subprocess.run(
-            ["droid", "exec", "-f", prompt_file, "-m", model, "-o", "text"],
+            ["droid", "exec", "-f", prompt_file, "-m", model, "-o", "text", "--auto", "low"],
             capture_output=True,
             text=True,
             timeout=timeout,
