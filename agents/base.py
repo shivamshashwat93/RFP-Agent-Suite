@@ -1,40 +1,61 @@
-from groq import Groq
+import subprocess
+import tempfile
+import os
 
 AVAILABLE_MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
+    "gemini-3-flash-preview",
+    "claude-haiku-4-5-20251001",
+    "glm-4.7",
+    "glm-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-fast",
+    "gemini-3-pro-preview",
 ]
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 
-MAX_CHAR_PER_TOKEN = 4
-
-CONTEXT_BUDGETS = {
-    "minimal": {"label": "Minimal (~2K tokens)", "ctx_chars": 8000, "prev_chars": 4000, "max_output": 2048},
-    "low": {"label": "Low (~4K tokens)", "ctx_chars": 16000, "prev_chars": 8000, "max_output": 3072},
-    "medium": {"label": "Medium (~8K tokens)", "ctx_chars": 32000, "prev_chars": 12000, "max_output": 4096},
-    "high": {"label": "High (~16K+ tokens)", "ctx_chars": 64000, "prev_chars": 24000, "max_output": 4096},
-}
-
-DEFAULT_BUDGET = "low"
+MAX_CONTEXT_CHARS = 60000
 
 
-def summarize_text(client, model: str, text: str, max_chars: int, label: str = "document") -> str:
+def call_droid(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 180) -> str:
+    fd, prompt_file = tempfile.mkstemp(suffix=".md", prefix="rfp_prompt_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(prompt)
+
+        result = subprocess.run(
+            ["droid", "exec", "-f", prompt_file, "-m", model, "-o", "text"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+        )
+        output = result.stdout.strip()
+        if result.returncode != 0 and not output:
+            return f"[Error] droid exec failed: {result.stderr.strip()}"
+        return output
+    except subprocess.TimeoutExpired:
+        return "[Error] droid exec timed out. Try a faster model or shorter input."
+    except FileNotFoundError:
+        return "[Error] 'droid' CLI not found. Install from https://docs.factory.ai"
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
+
+
+def summarize_text(text: str, max_chars: int, label: str, model: str = DEFAULT_MODEL) -> str:
     if len(text) <= max_chars:
         return text
-    chunk = text[:max_chars * 2]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a precise summarizer. Condense the text keeping ALL key facts, requirements, numbers, and names. No fluff."},
-            {"role": "user", "content": f"Summarize this {label} in under {max_chars // MAX_CHAR_PER_TOKEN} tokens. Keep every specific requirement, number, and deadline:\n\n{chunk}"},
-        ],
-        temperature=0.1,
-        max_tokens=max_chars // MAX_CHAR_PER_TOKEN,
+    chunk = text[: max_chars * 2]
+    prompt = (
+        "You are a precise summarizer. Condense the following text keeping "
+        "ALL key facts, requirements, numbers, names, and deadlines. "
+        "Output only the summary, no preamble.\n\n"
+        f"TEXT TO SUMMARIZE ({label}):\n{chunk}"
     )
-    return resp.choices[0].message.content
+    return call_droid(prompt, model, timeout=120)
 
 
 class BaseAgent:
@@ -42,10 +63,8 @@ class BaseAgent:
     description: str = ""
     system_prompt: str = ""
 
-    def __init__(self, api_key: str, model: str = DEFAULT_MODEL, budget: str = DEFAULT_BUDGET):
-        self.client = Groq(api_key=api_key)
+    def __init__(self, model: str = DEFAULT_MODEL):
         self.model_name = model
-        self.budget_cfg = CONTEXT_BUDGETS.get(budget, CONTEXT_BUDGETS[DEFAULT_BUDGET])
 
     def _truncate(self, text: str, max_chars: int) -> str:
         if len(text) <= max_chars:
@@ -53,23 +72,13 @@ class BaseAgent:
         return text[:max_chars] + "\n\n[... truncated ...]"
 
     def run(self, user_input: str, context: str = "") -> str:
-        max_ctx = self.budget_cfg["ctx_chars"]
-        max_output = self.budget_cfg["max_output"]
+        parts = [f"INSTRUCTIONS:\n{self.system_prompt}"]
 
         if context:
-            context = self._truncate(context, max_ctx)
-            user_input = self._truncate(user_input, max_ctx // 4)
-            prompt = f"CONTEXT:\n{context}\n\nUSER REQUEST:\n{user_input}"
-        else:
-            prompt = self._truncate(user_input, max_ctx)
+            context = self._truncate(context, MAX_CONTEXT_CHARS)
+            parts.append(f"CONTEXT:\n{context}")
 
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=max_output,
-        )
-        return response.choices[0].message.content
+        parts.append(f"USER REQUEST:\n{user_input}")
+
+        full_prompt = "\n\n".join(parts)
+        return call_droid(full_prompt, self.model_name)
