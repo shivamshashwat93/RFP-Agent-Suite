@@ -1,5 +1,6 @@
 import streamlit as st
 from agents import AGENTS, AnalystAgent, ResearcherAgent, DrafterAgent, ReviewerAgent
+from agents.base import AVAILABLE_MODELS, DEFAULT_MODEL
 from utils.document_parser import parse_document
 
 st.set_page_config(page_title="RFP Agent Suite", layout="wide")
@@ -20,7 +21,11 @@ for key, default in {
 with st.sidebar:
     st.title("RFP Agent Suite")
 
-    api_key = st.text_input("Google Gemini API Key", type="password")
+    api_key = st.text_input("Groq API Key", type="password",
+                             help="Get a free key at console.groq.com")
+
+    selected_model = st.selectbox("Model", AVAILABLE_MODELS,
+                                  index=AVAILABLE_MODELS.index(DEFAULT_MODEL))
 
     st.divider()
 
@@ -83,7 +88,7 @@ with col1:
 
     if prompt := st.chat_input("Ask about the RFP or give an instruction..."):
         if not api_key:
-            st.error("Enter your Gemini API key in the sidebar.")
+            st.error("Enter your Groq API key in the sidebar (free at console.groq.com).")
             st.stop()
         if not st.session_state.rfp_text:
             st.error("Upload an RFP document first.")
@@ -96,7 +101,7 @@ with col1:
         with st.chat_message("assistant"):
             if mode == "Manual Mode" and selected_agent:
                 # --- Manual: Run a single agent ---
-                agent = AGENTS[selected_agent](api_key)
+                agent = AGENTS[selected_agent](api_key, selected_model)
                 context = f"RFP DOCUMENT:\n{st.session_state.rfp_text}"
                 if st.session_state.knowledge_base:
                     context += "\n\nKNOWLEDGE BASE:\n" + "\n---\n".join(
@@ -119,7 +124,7 @@ with col1:
 
                 # Step 1: Analyst
                 with st.spinner("Step 1/4 - The Analyst: Extracting requirements..."):
-                    analyst = AnalystAgent(api_key)
+                    analyst = AnalystAgent(api_key, selected_model)
                     analyst_result = analyst.run(prompt, rfp_ctx)
                 with st.expander("Step 1: Analyst Output", expanded=True):
                     st.markdown(analyst_result)
@@ -127,7 +132,7 @@ with col1:
 
                 # Step 2: Researcher
                 with st.spinner("Step 2/4 - The Researcher: Finding relevant facts..."):
-                    researcher = ResearcherAgent(api_key)
+                    researcher = ResearcherAgent(api_key, selected_model)
                     researcher_result = researcher.run(
                         f"Find facts relevant to these requirements:\n{analyst_result}",
                         f"KNOWLEDGE BASE:\n{kb_ctx}",
@@ -138,7 +143,7 @@ with col1:
 
                 # Step 3: Drafter
                 with st.spinner("Step 3/4 - The Drafter: Writing proposal response..."):
-                    drafter = DrafterAgent(api_key)
+                    drafter = DrafterAgent(api_key, selected_model)
                     drafter_result = drafter.run(
                         f"Write a proposal response.\nREQUIREMENTS:\n{analyst_result}\n\nFACTS:\n{researcher_result}",
                         rfp_ctx,
@@ -149,7 +154,7 @@ with col1:
 
                 # Step 4: Reviewer
                 with st.spinner("Step 4/4 - The Reviewer: Checking compliance..."):
-                    reviewer = ReviewerAgent(api_key)
+                    reviewer = ReviewerAgent(api_key, selected_model)
                     reviewer_result = reviewer.run(
                         f"Review this draft:\nDRAFT:\n{drafter_result}\n\nREQUIREMENTS:\n{analyst_result}",
                         rfp_ctx,
